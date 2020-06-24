@@ -68,10 +68,12 @@ class TFLiteTensor:
 
 
 class TFLiteOperator:
-    def __init__(self, id=None, output=None, inputs=None):
+    def __init__(self, id=None, output=None, inputs=None, opcode=None, fixed_to=()):
         self.id = id
         self.output = output
         self.inputs = inputs if inputs is not None else []
+        self.opcode = opcode
+        self.fixed_to = fixed_to
 
     def __hash__(self):
         return hash(self.id)
@@ -161,8 +163,36 @@ class TFLiteModel:
             inputs = [tensors[j] for j in op.InputsAsNumpy()]
             assert len(inputs) > 0
 
-            tflite_op = TFLiteOperator(id=i, output=tensors[op.Outputs(0)] if has_output else None, inputs=inputs)
+            opcode = model.OperatorCodes(op.OpcodeIndex()).BuiltinCode()
+            tflite_op = TFLiteOperator(id=i,
+                                       opcode=opcode,
+                                       output=tensors[op.Outputs(0)] if has_output else None,
+                                       inputs=inputs)
             tflite_op.output.producer = tflite_op
+
+            if opcode == BuiltinOperator.ADD:
+                in0 = inputs[0]
+                for t in inputs[1:]:
+                    tprod = t.producer
+                    tprod.fixed_to = [in0.id]
+                tflite_op.fixed_to = [in0.id]
+            elif (opcode == BuiltinOperator.MAX_POOL_2D or
+                  opcode == BuiltinOperator.AVERAGE_POOL_2D):
+                in0 = inputs[0]
+                tflite_op.fixed_to = [in0.id]
+            elif opcode == BuiltinOperator.CONCATENATION:
+                fixed_to = []
+                for t in inputs:
+                    tprod = t.producer
+                    fixed_to.append(t.id)
+                tflite_op.fixed_to = fixed_to
+            elif opcode == BuiltinOperator.RESIZE_BILINEAR:
+                in0 = inputs[0]
+                tflite_op.fixed_to = [in0.id]
+
+            if opcode != BuiltinOperator.CONV_2D:
+                print("Must fix operator!", opcode, " fixed to: ", tflite_op.fixed_to)
+
             for t in inputs:
                 t.consumers.append(tflite_op)
             operators.append(tflite_op)
@@ -392,11 +422,15 @@ class TFLiteModel:
 
         with open(csv_file, 'w', newline='') as f:
             w = csv.writer(f)
-            w.writerow(["Id", "Name", "Shape", "Size"])
+            w.writerow(["Id", "Name", "Shape", "Size", "FixedTo"])
 
             for t in self.model_graph.tensors:
                 if t.size != 0:
-                    w.writerow([t.id, t.name, ' '.join(str(i) for i in t.shape), t.size])
+                    if t.producer is not None:
+                        fixed_to = " ".join(str(i) for i in t.producer.fixed_to)
+                    else:
+                        fixed_to = None
+                    w.writerow([t.id, t.name, ' '.join(str(i) for i in t.shape), t.size, fixed_to])
 
     def print_model_analysis(self):
         self._print_tensor_details()
